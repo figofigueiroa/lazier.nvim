@@ -168,7 +168,10 @@ local function setup_lazier(module, opts)
                 vim.opt.rtp:append(plugin.rtp)
             end
             for _, plugin in ipairs(cache.non_lazy_plugins) do
-                if not plugin.dep then
+                -- only apply simple single-schema plugins before the first
+                -- frame; anything needing lazy.nvim's opts merging is left to
+                -- the deferred lazy.nvim setup (and is not neutered there)
+                if not plugin.dep and plugin.simple then
                     local schema = require(plugin.path)
                     if plugin.idx then
                         schema = schema[plugin.idx]

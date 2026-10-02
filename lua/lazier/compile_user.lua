@@ -77,15 +77,29 @@ local function compile_user(module, opts, cache, rtps, has_lazier_rtp)
         plugin_paths[modpath] = mod
         plugin_modules[plugin_path] = mod
     end)
+    -- captures the return value of every spec module loaded by lazy.nvim
+    -- during setup (lazy loads spec modules with `loadfile`, bypassing the
+    -- `require` cache, so their tables are otherwise unreachable afterwards
+    -- and cannot be matched against the resolved plugins).
+    local module_cache = {}
     local loadfile = _G.loadfile
-    function _G.loadfile(path)
+    function _G.loadfile(path, ...)
         if plugin_paths[path] then
             return function()
                 return plugin_paths[path]
             end
-        else
-            return loadfile(path)
         end
+        local chunk = loadfile(path, ...)
+        if type(chunk) == "function" then
+            return function(...)
+                local ret = chunk(...)
+                if module_cache[path] == nil then
+                    module_cache[path] = ret
+                end
+                return ret
+            end
+        end
+        return chunk
     end
 
     local lazy = require("lazy")
@@ -99,52 +113,178 @@ local function compile_user(module, opts, cache, rtps, has_lazier_rtp)
     local color_rtp
     local non_lazy_plugins = {}
     local lazy_plugins = lazy.plugins()
-    for plugins_path, plugins in pairs(plugin_modules) do
-        local listSchema = true;
+
+    -- Collects the spec entries of a module (and its child modules, mirroring
+    -- lazy.nvim's `Spec:import` lsmod expansion and alphabetical ordering),
+    -- preferring tables captured during setup for identity matching.
+    local function module_specs(modname)
+        local specs
+        local mods = {}
+        lazy_util.lsmod(modname, function(child, modpath)
+            mods[#mods + 1] = { name = child, path = modpath }
+        end)
+        table.sort(mods, function(a, b)
+            return a.name < b.name
+        end)
+        for _, mod in ipairs(mods) do
+            local loaded = module_cache[mod.path]
+            if loaded == nil then
+                local ok, req = pcall(require, mod.name)
+                if ok then
+                    loaded = req
+                end
+            end
+            if type(loaded) == "table" then
+                local list = loaded
+                local list_schema = true
+                if
+                    type(list[1]) == "string"
+                    or type(list.url) == "string"
+                    or type(list.dir) == "string"
+                    or type(list.import) == "string"
+                then
+                    list_schema = false
+                    list = { list }
+                end
+                specs = specs or {}
+                for idx, spec in ipairs(list) do
+                    specs[#specs + 1] = {
+                        spec = spec,
+                        mod = mod.name,
+                        idx = idx,
+                        list_schema = list_schema,
+                    }
+                end
+            end
+        end
+        return specs
+    end
+
+    -- Expands a spec entry into flat records, resolving `import` specs
+    -- recursively (including lazy.nvim spec.import functions created by
+    -- LazyVim's extras). Without this, specs imported from other plugins
+    -- (e.g. a distro's `{ import = "lazyvim.plugins" }`) resolve to the
+    -- imported module's list, never match a single plugin and get dropped
+    -- from the compiled spec.
+    local function expand_entry(entry, out, seen)
+        local spec = entry.spec
+        if type(spec) ~= "table" then
+            return
+        end
+        local import = type(spec.import) == "string" and spec.import
+            or (
+                type(spec.import) == "function"
+                and type(spec.name) == "string"
+                and spec.name
+            )
+            or nil
+        if import then
+            if not seen[import] then
+                seen[import] = true
+                local imported = module_specs(import)
+                if imported then
+                    for _, child in ipairs(imported) do
+                        expand_entry(child, out, seen)
+                    end
+                end
+            end
+            -- the import spec itself may also define a plugin
+            if spec[1] or spec.url or spec.dir then
+                out[#out + 1] = entry
+            end
+            return
+        end
+        out[#out + 1] = entry
+    end
+
+    local entries = {}
+    local seen = {}
+    -- tracks, per resolved plugin, how many spec entries matched and whether
+    -- every matched schema is simple (plain `opts` table or none, no config
+    -- function). Only simple single-entry plugins can be safely configured
+    -- before the first frame; anything else needs lazy.nvim's opts merging
+    -- and must be left to the deferred lazy.nvim setup.
+    local matched_counts = {}
+    local all_simple = {}
+    local module_names = {}
+    for plugins_path in pairs(plugin_modules) do
+        module_names[#module_names + 1] = plugins_path
+    end
+    table.sort(module_names)
+    for _, plugins_path in ipairs(module_names) do
+        local plugins = plugin_modules[plugins_path]
+        local list_schema = true
         if
             type(plugins[1]) == "string"
             or type(plugins.url) == "string"
             or type(plugins.dir) == "string"
             or type(plugins.import) == "string"
         then
-            listSchema = false
+            list_schema = false
             plugins = { plugins }
         end
         package.loaded[plugins_path] = plugins
         for plugin_idx, plugin in ipairs(plugins) do
-            if plugin.import then
-                plugin = require(plugin.import)
-            end
-            local lazy_plugin
-            for _, candidate in ipairs(lazy_plugins) do
-                if has_index(candidate, plugin)
-                    or candidate.dir and plugin.dir
-                    and fs.abspath(candidate.dir)
-                        == fs.abspath(plugin.dir)
-                then
-                    lazy_plugin = candidate
-                    break
-                end
-            end
+            expand_entry({
+                spec = plugin,
+                mod = plugins_path,
+                idx = plugin_idx,
+                list_schema = list_schema,
+            }, entries, seen)
+        end
+    end
 
-            if lazy_plugin ~= nil then
-                if colors_name and not color_rtp then
-                    local extensions = { "vim", "lua" }
-                    for _, extension in ipairs(extensions) do
-                        local path = fs.join(
-                            lazy_plugin.dir, "colors", colors_name .. "." .. extension)
-                        if fs.stat(path) then
-                            color_rtp = lazy_plugin.dir
-                            break
-                        end
+    for _, entry in ipairs(entries) do
+        local plugin = entry.spec
+        local plugins_path = entry.mod
+        local plugin_idx = entry.idx
+        local listSchema = entry.list_schema
+        local lazy_plugin
+        for _, candidate in ipairs(lazy_plugins) do
+            if has_index(candidate, plugin)
+                or candidate.dir and plugin.dir
+                and fs.abspath(candidate.dir)
+                    == fs.abspath(plugin.dir)
+            then
+                lazy_plugin = candidate
+                break
+            end
+        end
+
+        if lazy_plugin ~= nil then
+            local name = lazy_plugin.name
+            matched_counts[name] = (matched_counts[name] or 0) + 1
+            local simple = (plugin.config == nil or plugin.config == true)
+                and (plugin.opts == nil or type(plugin.opts) == "table")
+            if not simple then
+                all_simple[name] = false
+            elseif all_simple[name] == nil then
+                all_simple[name] = true
+            end
+            if colors_name and not color_rtp then
+                local extensions = { "vim", "lua" }
+                for _, extension in ipairs(extensions) do
+                    local path = fs.join(
+                        lazy_plugin.dir, "colors", colors_name .. "." .. extension)
+                    if fs.stat(path) then
+                        color_rtp = lazy_plugin.dir
+                        break
                     end
                 end
+            end
 
                 local function push_non_lazy_plugin(non_lazy_plugin)
                     for i, existing in ipairs(non_lazy_plugins) do
                         if existing.name == non_lazy_plugin.name then
-                            non_lazy_plugins[i] = non_lazy_plugin
-                            non_lazy_plugin.dep = existing.dep and non_lazy_plugin.dep
+                            -- prefer the entry whose schema can configure the
+                            -- plugin (has `opts`/`config`), so that import
+                            -- carriers pointing at the same plugin do not
+                            -- replace the richer spec that actually
+                            -- configures it before the first frame
+                            if non_lazy_plugin.rich or not existing.rich then
+                                non_lazy_plugin.dep = existing.dep and non_lazy_plugin.dep
+                                non_lazy_plugins[i] = non_lazy_plugin
+                            end
                             return
                         end
                     end
@@ -170,31 +310,44 @@ local function compile_user(module, opts, cache, rtps, has_lazier_rtp)
                         path = plugins_path,
                         idx = listSchema and plugin_idx or nil,
                         main = loader.get_main(lazy_plugin),
+                        rich = plugin.opts ~= nil or plugin.config ~= nil,
                     })
                 end
-                local spec = vim.deepcopy(plugin)
-                spec.keys = lazy_plugin.keys
-                spec.event = lazy_plugin.event
-                spec.ft = lazy_plugin.ft
-                spec.cmd = lazy_plugin.cmd
-                local parent = serializer.function_call("require", plugins_path);
-                if listSchema then
-                    parent = serializer.index(parent, plugin_idx)
-                end
-                fragment_functions(serializer.serialize(parent), spec, {}, 1)
-                for _, v in pairs(spec) do
-                    if type(v) == "table"
-                        and getmetatable(v) ~= serializer.Fragment
-                    then
-                        setmetatable(v, nil)
-                    end
-                end
-                if serializer.can_serialize(spec) then
-                    table.insert(spec_plugins, spec)
-                else
-                    table.insert(spec_plugins, parent)
+            local spec = vim.deepcopy(plugin)
+            spec.keys = lazy_plugin.keys
+            spec.event = lazy_plugin.event
+            spec.ft = lazy_plugin.ft
+            spec.cmd = lazy_plugin.cmd
+            local parent = serializer.function_call("require", plugins_path);
+            if listSchema then
+                parent = serializer.index(parent, plugin_idx)
+            end
+            fragment_functions(serializer.serialize(parent), spec, {}, 1)
+            for _, v in pairs(spec) do
+                if type(v) == "table"
+                    and getmetatable(v) ~= serializer.Fragment
+                then
+                    setmetatable(v, nil)
                 end
             end
+            if serializer.can_serialize(spec) then
+                table.insert(spec_plugins, spec)
+            else
+                table.insert(spec_plugins, parent)
+            end
+        end
+    end
+
+    -- only single-entry plugins whose schema is simple (plain `opts` table or
+    -- none, no config function) can be safely configured before the first
+    -- frame; anything that needs lazy.nvim's opts merging must run in the
+    -- deferred lazy.nvim setup instead.
+    for _, non_lazy in ipairs(non_lazy_plugins) do
+        if non_lazy.dep then
+            non_lazy.simple = false
+        else
+            non_lazy.simple = matched_counts[non_lazy.name] == 1
+                and all_simple[non_lazy.name] == true
         end
     end
 

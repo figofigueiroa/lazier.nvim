@@ -10,6 +10,7 @@ local function after_lazy_start(opts, loadplugins, cache, rtps, has_lazier_rtp)
                 if plugin.dir
                     and fs.abspath(candidate.rtp)
                         == fs.abspath(plugin.dir)
+                    and candidate.simple
                 then
                     plugin.config = function() end
                     break
