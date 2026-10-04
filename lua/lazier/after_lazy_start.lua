@@ -1,4 +1,4 @@
-local function after_lazy_start(opts, loadplugins, cache, rtps, has_lazier_rtp)
+local function after_lazy_start(opts, loadplugins, cache, rtps, has_lazier_rtp, plugin_spec)
     vim.loader.enable()
     local fs = require "lazier.util.fs"
     vim.o.loadplugins = loadplugins
@@ -20,7 +20,9 @@ local function after_lazy_start(opts, loadplugins, cache, rtps, has_lazier_rtp)
         end
     end
     local lazy = require("lazy")
-    local plugin_spec = require("lazier_plugin_spec")
+    -- spec pre-built during startup (pre-VimEnter); fallback for callers
+    -- that still build it here
+    plugin_spec = plugin_spec or require("lazier_plugin_spec")
     lazy.setup(plugin_spec, opts)
     loader._load = load
     if not has_lazier_rtp() then

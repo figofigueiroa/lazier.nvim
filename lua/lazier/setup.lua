@@ -128,6 +128,20 @@ local function setup_lazier(module, opts)
         loadfile(constants.user_compiled_path, "b")()
     end
 
+    -- Append the non-lazy plugin runtimes first: the compiled spec's
+    -- module requires resolve through them
+    if cache.non_lazy_plugins then
+        for _, plugin in ipairs(cache.non_lazy_plugins) do
+            vim.opt.rtp:append(plugin.rtp)
+        end
+    end
+
+    -- Build the spec table during startup, before VimEnter: spec modules
+    -- guard require-time side effects on `vim.v.vim_did_enter` (e.g.
+    -- LazyVim's picker registration) and must load like during a compile
+    -- run. The heavy `lazy.setup()` stays deferred to the first frame.
+    local plugin_spec = require("lazier_plugin_spec")
+
     if opts.lazier.before then
         opts.lazier.before()
     end
@@ -165,9 +179,6 @@ local function setup_lazier(module, opts)
         end
         if cache.non_lazy_plugins then
             for _, plugin in ipairs(cache.non_lazy_plugins) do
-                vim.opt.rtp:append(plugin.rtp)
-            end
-            for _, plugin in ipairs(cache.non_lazy_plugins) do
                 -- only apply simple single-schema plugins before the first
                 -- frame; anything needing lazy.nvim's opts merging is left to
                 -- the deferred lazy.nvim setup (and is not neutered there)
@@ -191,12 +202,11 @@ local function setup_lazier(module, opts)
         end
         vim.schedule(function()
             require("lazier.after_lazy_start")(
-                opts, loadplugins, cache, rtps, has_lazier_rtp)
+                opts, loadplugins, cache, rtps, has_lazier_rtp, plugin_spec)
         end)
     else
         vim.loader.enable()
         local lazy = require("lazy")
-        local plugin_spec = require("lazier_plugin_spec")
         lazy.setup(plugin_spec, opts)
             if not has_lazier_rtp() then
                 vim.opt.rtp:append(rtps.lazier)

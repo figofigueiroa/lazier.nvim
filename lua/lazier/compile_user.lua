@@ -103,8 +103,27 @@ local function compile_user(module, opts, cache, rtps, has_lazier_rtp)
     end
 
     local lazy = require("lazy")
+    -- LazyVim's import-order check reads lazy.nvim's import ledger; the
+    -- bootstrap below uses a root `plugins` import, which is always recorded
+    -- first, so the check can never pass on compile runs (the fast path's
+    -- flat spec + trailing distro import passes it legitimately)
+    vim.g.lazyvim_check_order = false
     lazy.setup(module, opts)
     _G.loadfile = loadfile
+
+    -- lazy.nvim's import ledger and resolved plugin map, replayed below as a
+    -- seed before the compiled spec is constructed: spec modules may read
+    -- lazy.nvim's config at require time (e.g. LazyVim's `has_extra`/`has`),
+    -- and in the fast path the spec table is built before lazy.setup()
+    -- creates the real loader (which then replaces the seed with
+    -- `Config.spec = Spec.new()`). Plugins are seeded as `{ name, dir }`
+    -- stubs: enough for `has`/`get_plugin_path` at require time.
+    local lazy_config = require("lazy.core.config")
+    local spec_modules = lazy_config.spec.modules
+    local spec_plugin_stubs = {}
+    for name, plugin in pairs(lazy_config.spec.plugins) do
+        spec_plugin_stubs[name] = { name = name, dir = plugin.dir }
+    end
 
     local loader = require("lazy.core.loader")
 
@@ -113,6 +132,19 @@ local function compile_user(module, opts, cache, rtps, has_lazier_rtp)
     local color_rtp
     local non_lazy_plugins = {}
     local lazy_plugins = lazy.plugins()
+
+    -- Modules required while walking the spec, in lazy.nvim's import order.
+    -- Emitted as a prologue in the compiled spec so that import-time side
+    -- effects still run in order (e.g. LazyVim's `lazyvim.plugins.xtras`
+    -- initializes its defaults registry before extras call into it).
+    local prologue = {}
+    local prologue_seen = {}
+    local function add_prologue(name)
+        if not prologue_seen[name] then
+            prologue_seen[name] = true
+            prologue[#prologue + 1] = name
+        end
+    end
 
     -- Collects the spec entries of a module (and its child modules, mirroring
     -- lazy.nvim's `Spec:import` lsmod expansion and alphabetical ordering),
@@ -135,6 +167,7 @@ local function compile_user(module, opts, cache, rtps, has_lazier_rtp)
                 end
             end
             if type(loaded) == "table" then
+                add_prologue(mod.name)
                 local list = loaded
                 local list_schema = true
                 if
@@ -212,6 +245,7 @@ local function compile_user(module, opts, cache, rtps, has_lazier_rtp)
     end
     table.sort(module_names)
     for _, plugins_path in ipairs(module_names) do
+        add_prologue(plugins_path)
         local plugins = plugin_modules[plugins_path]
         local list_schema = true
         if
@@ -351,8 +385,20 @@ local function compile_user(module, opts, cache, rtps, has_lazier_rtp)
         end
     end
 
-    local compiled_plugin_spec =
-        "return " .. serializer.serialize(spec_plugins, 0, 80 - 7)
+    local prologue_src = {
+        'local LazyConfig = require("lazy.core.config")',
+        "LazyConfig.spec = LazyConfig.spec or { modules = "
+            .. serializer.serialize(spec_modules)
+            .. ", plugins = "
+            .. serializer.serialize(spec_plugin_stubs)
+            .. " }",
+        "LazyConfig.options = LazyConfig.options or {}",
+    }
+    for _, mod in ipairs(prologue) do
+        prologue_src[#prologue_src + 1] = ("require(%q)"):format(mod)
+    end
+    local compiled_plugin_spec = table.concat(prologue_src, "\n")
+        .. "\nreturn " .. serializer.serialize(spec_plugins, 0, 80 - 7)
 
     local paths = {
         vim.fn.stdpath("config") .. "/lua"
