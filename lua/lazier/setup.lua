@@ -34,12 +34,14 @@ local function check_cache(detect_config_changes)
         recompile = true
     else
         success, cache = pcall(vim.json.decode, contents)
-        if not success then
-            recompile = true
-        else
-            last_modified = cache.modified
-            last_tally = cache.tally
-        end
+            if not success then
+                recompile = true
+            else
+                -- or 0: cache.json written by versions using
+                -- strftime('%s') (empty on Windows) lacks `modified`
+                last_modified = cache.modified or 0
+                last_tally = cache.tally or 0
+            end
         if cache.version ~= vim.v.version then
             recompile = true
         end
@@ -50,7 +52,9 @@ local function check_cache(detect_config_changes)
         recompile, tally = require("lazier.change_detect")(recompile, last_modified, last_tally)
     end
 
-    local timestamp = tonumber(vim.fn.strftime('%s'))
+    -- os.time, not strftime('%s'): Windows strftime has no %s (returns "",
+    -- tonumber -> nil, and json.encode then drops `modified` from cache.json)
+    local timestamp = os.time()
     cache = {
         modified = timestamp,
         colorscheme = cache
