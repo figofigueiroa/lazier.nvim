@@ -1,8 +1,18 @@
 local fs = require "lazier.util.fs"
 
 local function modified_since(stat, timestamp)
-    return stat.mtime.sec > timestamp
-        or stat.ctime.sec > timestamp
+    -- stat can be nil on Windows (broken junctions, reparse points,
+    -- transient AV locks); a failed stat is treated as modified
+    -- (conservative: recompile rather than miss a change)
+    if not stat then
+        return true
+    end
+    -- ponytail: stat can succeed with missing timestamps (sec nil) on some
+    -- filesystems; those count as unmodified — change detection is not
+    -- covered there, recompile manually (:LazierClear) if edits go unnoticed
+    local mtime = stat.mtime or {}
+    local ctime = stat.ctime or {}
+    return (mtime.sec or 0) > timestamp or (ctime.sec or 0) > timestamp
 end
 
 local function check_modified_tree(root, timestamp)
