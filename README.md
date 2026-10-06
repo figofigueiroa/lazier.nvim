@@ -28,7 +28,7 @@ without any extra effort.
 ```lua
 local lazierPath = vim.fn.stdpath("data") .. "/lazier/lazier.nvim"
 if not (vim.uv or vim.loop).fs_stat(lazierPath) then
-    local repo = "https://github.com/jake-stewart/lazier.nvim.git"
+    local repo = "https://github.com/figofigueiroa/lazier.nvim.git"
     local out = vim.fn.system({
         "git", "clone", "--branch=stable-v2", repo, lazierPath })
     if vim.v.shell_error ~= 0 then
