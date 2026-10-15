@@ -37,8 +37,8 @@ local function check_cache(detect_config_changes)
         if not success then
             recompile = true
         else
-            last_modified = cache.modified
-            last_tally = cache.tally
+            last_modified = cache.modified or 0
+            last_tally = cache.tally or 0
         end
         if cache.version ~= vim.v.version then
             recompile = true
@@ -50,7 +50,7 @@ local function check_cache(detect_config_changes)
         recompile, tally = require("lazier.change_detect")(recompile, last_modified, last_tally)
     end
 
-    local timestamp = tonumber(vim.fn.strftime('%s'))
+    local timestamp = os.time()
     cache = {
         modified = timestamp,
         colorscheme = cache
